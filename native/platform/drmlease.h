@@ -5,7 +5,7 @@
  * (platform.c); this file asks for the lease, lights the panel and flips its buffers. The touch
  * reader for the panel's own touchscreen is lease_touch.c. */
 #pragma once
-#if defined(__linux__)
+#if defined(__linux__) && !defined(ALBW_WINDOWS)   /* the Windows package is this Linux build: no DRM there */
 #define ALBW_DRM_LEASE 1
 
 #include <stdbool.h>
