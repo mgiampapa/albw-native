@@ -59,7 +59,7 @@ if [[ $ARCH == x86 && "${ALBW_FCONV_INTERIM:-1}" == 1 && ( ! -f $B/fconv_interim
     python3 tools/fconv_interim.py | tail -1
 fi
 NATIVE=()
-for f in native/platform/platform.c native/runtime/*.c native/audio/mixer.c native/audio/fx.c native/audio/output.c $(ls native/render/*.c native/sdk/*.c native/game/*.c native/robust/*.c native/gameplay/*.c native/compilefix/*.c native/framework/*.c native/core/*.c native/route/*.c 2>/dev/null) $(git ls-files native/hot | grep -E "^native/hot/[^/]+\.c$"); do
+for f in native/platform/platform.c native/platform/drmlease.c native/platform/lease_touch.c third_party/wayland/drm-lease-v1-protocol.c native/runtime/*.c native/audio/mixer.c native/audio/fx.c native/audio/output.c $(ls native/render/*.c native/sdk/*.c native/game/*.c native/robust/*.c native/gameplay/*.c native/compilefix/*.c native/framework/*.c native/core/*.c native/route/*.c 2>/dev/null) $(git ls-files native/hot | grep -E "^native/hot/[^/]+\.c$"); do
     # one object per source path (native/render/h3d.c and native/sdk/h3d.c share a basename)
     o=$NOBJ/${f%.c}.o
     mkdir -p "$(dirname "$o")"
@@ -76,8 +76,10 @@ for f in native/platform/platform.c native/runtime/*.c native/audio/mixer.c nati
     [[ -f "$o" && "$o" -nt "$f" ]] || stale=1
     # platform.c #includes layout.c, input.c, menu.c (+ menu_font.h): rebuild when any changed
     if [[ "$f" == native/platform/platform.c && $stale == 0 ]]; then
-        for inc in native/platform/{layout,input,menu,selector}.c native/platform/{menu_font,layout,gl,selector_img}.h native/render/render.h; do [[ "$inc" -nt "$o" ]] && stale=1; done
+        for inc in native/platform/{layout,input,menu,selector}.c native/platform/{menu_font,layout,gl,selector_img,drmlease}.h native/render/render.h; do [[ "$inc" -nt "$o" ]] && stale=1; done
     fi
+    # the leased panel (drmlease.c): Wayland's client headers and the drm-lease protocol, vendored
+    [[ "$f" == native/platform/drmlease.c || "$f" == third_party/wayland/* ]] && EXTRA=(-Ithird_party/wayland)
     [[ $stale == 0 ]] || clang "${CFLAGS[@]}" -Inative/include "${EXTRA[@]}" \
         $(PKG_CONFIG_LIBDIR=$PCP pkg-config --cflags sdl3) -c "$f" -o "$o"
     NATIVE+=("$o")

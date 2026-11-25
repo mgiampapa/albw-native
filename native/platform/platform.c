@@ -31,6 +31,7 @@ __attribute__((weak)) void prof_frame(void) {}
 #else
 #include "layout.h"
 #endif
+#include "drmlease.h"   /* the bottom screen on a leased panel (Armada Game Mode on the AYN Thor) */
 
 /* Keyboard + game controller input (input.h), compiled in the same way as layout.c; a build
  * that compiles input.c separately defines PLAT_INPUT_SEPARATE. */
@@ -156,6 +157,15 @@ static int g_title_dirty;   /* " - 59.9 fps" while Debug > Show FPS is on, + a s
 typedef struct { GLuint fbo, color, depth; int w, h; } Target;
 static Target screens[2];
 static GLuint blit_prog, blit_vao;
+static const char *BLIT_VS =
+    "#version 330 core\n"
+    "uniform vec4 rect; out vec2 uv;\n"
+    "void main(){ vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1); uv = p;\n"
+    "  gl_Position = vec4(rect.xy + p * rect.zw, 0, 1); }\n";
+static const char *BLIT_FS =
+    "#version 330 core\n"
+    "in vec2 uv; out vec4 o; uniform sampler2D tex;\n"
+    "void main(){ o = texture(tex, uv); }\n";
 
 static void target_init(Target *t, int w, int h) {
     t->w = w;
@@ -181,6 +191,145 @@ static void target_init(Target *t, int w, int h) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+static void plat_composite_to(GLuint fbo, const Layout *l);
+
+/* ------------------------------------------------------------------ leased bottom panel (drmlease.h)
+ * Armada's Game Mode on the AYN Thor: gamescope shows the top panel only and leases the bottom one to
+ * a program that asks. ALBW_DRM_LEASE=<connector>|auto (a launcher sets it there) puts the bottom
+ * screen on the leased panel: it is composited upright at the panel's size as in a window, then
+ * drawn turned straight into the panel's buffer (imported as an EGL image: SDL runs on EGL then), and
+ * the flip waits in the kernel for the GPU's fence. The CPU copies nothing and waits for nothing: the
+ * window shows the top screen alone, with no added delay, and the panel the same frame's bottom screen.
+ * Touches come from the panel's own touchscreen, ALBW_TOUCH_DEVICE (its axes turned as the panel is,
+ * ALBW_TOUCH_ROTATE=0|90|180|270 overrides). Without a lease nothing changes. */
+#ifdef ALBW_DRM_LEASE
+#include <SDL3/SDL_egl.h>
+#include <unistd.h>
+static int g_lease;
+static Target lease_target;   /* the bottom screen, upright, at the panel's size */
+static struct { GLuint tex, fbo; EGLImageKHR image; } lease_buf[DRMLEASE_BUFFERS];   /* the panel's buffers */
+static int lease_panel_w, lease_panel_h;   /* the panel's own size (unturned) */
+static GLuint lease_prog;
+static GLint lease_s, lease_t;
+static EGLDisplay lease_dpy;
+static PFNEGLCREATESYNCKHRPROC lease_create_sync;
+static PFNEGLDESTROYSYNCKHRPROC lease_destroy_sync;
+static PFNEGLDUPNATIVEFENCEFDANDROIDPROC lease_dup_fence;
+
+/* the upright picture turned onto the panel: the panel's point p (0..1, row 0 = the buffer's first =
+ * the panel's top) samples the picture at (dot(s.xy, p) + s.z, dot(t.xy, p) + t.z), by the turns in
+ * drmlease.c (270: u = y, v = pw-1-x). The picture's texture has its bottom row first. */
+static const char *LEASE_VS =
+    "#version 330 core\n"
+    "uniform vec3 s, t; out vec2 uv;\n"
+    "void main(){ vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1);\n"
+    "  uv = vec2(dot(s.xy, p) + s.z, dot(t.xy, p) + t.z); gl_Position = vec4(p * 2.0 - 1.0, 0, 1); }\n";
+
+/* SDL on EGL (the panel's buffers are EGL images): before the first window */
+static void plat_lease_prefer_egl(void) {
+    const char *want = getenv("ALBW_DRM_LEASE");
+    if ((want && *want) || getenv("ALBW_DRM_LEASE_TEST")) SDL_SetHint(SDL_HINT_VIDEO_FORCE_EGL, "1");
+}
+
+static int plat_lease_import(int i) {
+    int fd, pitch, w, h;
+    drmlease_buffer(i, &fd, &pitch, &w, &h);
+    lease_panel_w = w, lease_panel_h = h;
+    PFNEGLCREATEIMAGEKHRPROC create_image = (PFNEGLCREATEIMAGEKHRPROC)SDL_EGL_GetProcAddress("eglCreateImageKHR");
+    void (*target_texture)(GLenum, void *) = (void (*)(GLenum, void *))SDL_GL_GetProcAddress("glEGLImageTargetTexture2DOES");
+    if (!create_image || !target_texture) return 0;
+    const EGLint attrs[] = {EGL_WIDTH, w, EGL_HEIGHT, h, EGL_LINUX_DRM_FOURCC_EXT, 0x34325258 /* XRGB8888 */,
+                            EGL_DMA_BUF_PLANE0_FD_EXT, fd, EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+                            EGL_DMA_BUF_PLANE0_PITCH_EXT, pitch, EGL_NONE};
+    lease_buf[i].image = create_image(lease_dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
+    if (lease_buf[i].image == EGL_NO_IMAGE_KHR) return 0;
+    glGenTextures(1, &lease_buf[i].tex);
+    glBindTexture(GL_TEXTURE_2D, lease_buf[i].tex);
+    target_texture(GL_TEXTURE_2D, lease_buf[i].image);
+    glGenFramebuffers(1, &lease_buf[i].fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, lease_buf[i].fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, lease_buf[i].tex, 0);
+    int ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return ok;
+}
+
+static void plat_lease_init(void) {
+    const char *want = getenv("ALBW_DRM_LEASE");
+    if ((!want || !*want) && !getenv("ALBW_DRM_LEASE_TEST")) return;
+    lease_dpy = SDL_EGL_GetCurrentDisplay();
+    lease_create_sync = (PFNEGLCREATESYNCKHRPROC)SDL_EGL_GetProcAddress("eglCreateSyncKHR");
+    lease_destroy_sync = (PFNEGLDESTROYSYNCKHRPROC)SDL_EGL_GetProcAddress("eglDestroySyncKHR");
+    lease_dup_fence = (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)SDL_EGL_GetProcAddress("eglDupNativeFenceFDANDROID");
+    if (!lease_dpy || !lease_create_sync || !lease_destroy_sync || !lease_dup_fence) {
+        fprintf(stderr, "platform: no EGL with native fences (%s): the bottom screen stays in the window\n",
+                lease_dpy ? "eglDupNativeFenceFDANDROID missing" : "SDL is not on EGL");
+        return;
+    }
+    int w, h;
+    if (!drmlease_open(want, &w, &h)) return;
+    int imported = 0;
+    while (imported < DRMLEASE_BUFFERS && plat_lease_import(imported)) imported++;
+    if (imported < DRMLEASE_BUFFERS) {   /* (a buffer left out would be framebuffer 0: the window) */
+        fprintf(stderr, "platform: the panel's buffers cannot be drawn into (EGL image or framebuffer refused): the bottom screen stays in the window\n");
+        drmlease_close();
+        return;
+    }
+    target_init(&lease_target, w, h);
+    lease_prog = gl_program(LEASE_VS, BLIT_FS);
+    lease_s = glGetUniformLocation(lease_prog, "s");
+    lease_t = glGetUniformLocation(lease_prog, "t");
+    g_lease = 1;
+    fprintf(stderr, "platform: bottom screen on the leased panel (%dx%d), the window shows the top screen\n", w, h);
+}
+
+/* the bottom screen in the upright picture (layout_compute_single at the panel's upright size) */
+static void plat_lease_layout(Layout *l) { layout_compute_single(&g_layout_cfg, SCREEN_BOTTOM, lease_target.w, lease_target.h, l); }
+
+/* After the window's picture, before its swap: this frame's bottom screen onto the panel. Skipped
+ * while the last flip is still on its way (the panel then keeps the frame before). */
+static void plat_lease_draw(void) {
+    int i = drmlease_free_buffer();
+    if (i < 0) return;
+    Layout l;
+    plat_lease_layout(&l);
+    plat_composite_to(lease_target.fbo, &l);
+    static const float turns[4][6] = {   /* s, t for rotations 0, 90, 180, 270 */
+        {1, 0, 0, 0, -1, 1}, {0, -1, 1, -1, 0, 1}, {-1, 0, 1, 0, 1, 0}, {0, 1, 0, 1, 0, 0}};
+    const float *m = turns[(drmlease_rotation() / 90) & 3];
+    glBindFramebuffer(GL_FRAMEBUFFER, lease_buf[i].fbo);
+    glViewport(0, 0, lease_panel_w, lease_panel_h);
+    glUseProgram(lease_prog);
+    glUniform3f(lease_s, m[0], m[1], m[2]);
+    glUniform3f(lease_t, m[3], m[4], m[5]);
+    glBindVertexArray(blit_vao);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, lease_target.color);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    EGLSyncKHR sync = lease_create_sync(lease_dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+    glFlush();   /* the fence's file exists once the commands are flushed */
+    int fence = sync != EGL_NO_SYNC_KHR ? lease_dup_fence(lease_dpy, sync) : EGL_NO_NATIVE_FENCE_FD_ANDROID;
+    if (sync != EGL_NO_SYNC_KHR) lease_destroy_sync(lease_dpy, sync);
+    drmlease_flip(i, fence);
+}
+
+/* the panel's touchscreen as the bottom screen's touch: *pressed, *inside and the 3DS point */
+static int plat_lease_touch(int *pressed, int *inside, int *tx, int *ty) {
+    const char *dev = getenv("ALBW_TOUCH_DEVICE");
+    const char *rot = getenv("ALBW_TOUCH_ROTATE");
+    int down;
+    float nx, ny;
+    if (!dev || !*dev || !lease_touch_poll(dev, rot ? atoi(rot) : (360 - drmlease_rotation()) % 360, &down, &nx, &ny))
+        return 0;
+    Layout l;
+    plat_lease_layout(&l);
+    *inside = layout_to_screen(&l, SCREEN_BOTTOM, nx * lease_target.w, ny * lease_target.h, tx, ty);
+    *pressed = down;
+    return 1;
+}
+#endif
+
 /* Internal resolution (Esc menu, layout.cfg render_scale, --render-scale, ALBW_RENDER_SCALE):
  * the renderer's surfaces and these screen targets are re-created at the new multiple. */
 static int g_want_render_scale;
@@ -199,15 +348,6 @@ static void plat_apply_render_scale(int r) {
     cfg.render_scale = r;
 }
 
-static const char *BLIT_VS =
-    "#version 330 core\n"
-    "uniform vec4 rect; out vec2 uv;\n"
-    "void main(){ vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1); uv = p;\n"
-    "  gl_Position = vec4(rect.xy + p * rect.zw, 0, 1); }\n";
-static const char *BLIT_FS =
-    "#version 330 core\n"
-    "in vec2 uv; out vec4 o; uniform sampler2D tex;\n"
-    "void main(){ o = texture(tex, uv); }\n";
 
 #ifndef ALBW_WINDOWS
 /* Hybrid laptops (Intel / AMD graphics + an NVIDIA GPU, "Optimus"): OpenGL runs on the built-in GPU
@@ -341,6 +481,9 @@ sdl_ok:
         g_last_two_preset = g_layout_cfg.preset;
     g_joined_w = TOP_W * cfg.scale;
     g_joined_h = SCREEN_H * 2 * cfg.scale;
+#ifdef ALBW_DRM_LEASE
+    plat_lease_prefer_egl();
+#endif
     if (plat_windows_init()) return -1;
     ctx = SDL_GL_CreateContext(win);
     if (!ctx) {
@@ -375,6 +518,9 @@ sdl_ok:
     glGenVertexArrays(1, &blit_vao);
     /* separate: the bottom screen's window (shares ctx); sets the swap intervals in both modes */
     plat_set_windows(g_separate, 0);
+#ifdef ALBW_DRM_LEASE
+    if (!g_separate) plat_lease_init();
+#endif
     if (g_gamescope) {
         SDL_SetWindowFullscreen(win, true);
         fprintf(stderr, "platform: gamescope / Steam Deck Game Mode: one full-screen window; "
@@ -386,6 +532,9 @@ sdl_ok:
 
 void plat_shutdown(void) {
     input_shutdown();
+#ifdef ALBW_DRM_LEASE
+    if (g_lease) drmlease_close();
+#endif
     if (g_geom_dirty_ns && layout_save(&g_layout_cfg, NULL)) fprintf(stderr, "layout: cannot save %s\n", layout_default_path());
     if (win && ctx) SDL_GL_MakeCurrent(win, ctx);
     if (win_bottom) SDL_DestroyWindow(win_bottom);
@@ -834,7 +983,19 @@ static void plat_restart(void) {
     fprintf(stderr, "menu: restarting\n");
     fflush(NULL);
     plat_shutdown();
-    execv("/proc/self/exe", albw_argv);
+    const char *exe = getenv("ALBW_EXE");
+    if (exe && *exe) {   /* started through a bundled loader (/proc/self/exe): the loader again, then the program */
+        int argc = 0;
+        while (albw_argv[argc]) argc++;
+        char **av = calloc((size_t)argc + 2, sizeof *av);
+        if (av) {
+            av[0] = "/proc/self/exe";
+            av[1] = (char *)exe;
+            for (int i = 1; i < argc; i++) av[i + 1] = albw_argv[i];
+            execv("/proc/self/exe", av);
+        }
+    } else
+        execv("/proc/self/exe", albw_argv);
     fprintf(stderr, "menu: restart failed (%s)\n", strerror(errno));
     _exit(1);
 }
@@ -1408,6 +1569,12 @@ int plat_poll(void) {
         pressed = (mb & SDL_BUTTON_LMASK) && !g_layout_editing && g_layout_edit.mode == LAYOUT_EDIT_NONE &&
                   g_layout.visible[SCREEN_BOTTOM];
     }
+#ifdef ALBW_DRM_LEASE
+    if (g_lease) {
+        pressed = inside = 0;
+        plat_lease_touch(&pressed, &inside, &tx, &ty);
+    }
+#endif
     touching = pressed && (inside || touching);
     in.touch = touching;
     if (in.touch) {
@@ -1542,8 +1709,8 @@ static void shot_maybe(void) {
 }
 
 /* draw the screens of layout l into the current window's default framebuffer */
-static void plat_composite(const Layout *l) {
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+static void plat_composite_to(GLuint fbo, const Layout *l) {
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glViewport(0, 0, l->ww, l->wh);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
@@ -1597,6 +1764,9 @@ static void plat_composite(const Layout *l) {
         }
     }
 }
+
+static void plat_composite(const Layout *l) { plat_composite_to(0, l); }
+
 
 #include "menu.c"   /* Esc menu overlay (pauses the game inside plat_end_frame) */
 
@@ -1662,7 +1832,17 @@ void plat_end_frame(void) {
     SDL_Window *last;   /* presented after the block below starts: may wait for vsync */
     if (!g_separate) {
         plat_layout_update();
+#ifdef ALBW_DRM_LEASE
+        if (g_lease) {   /* the window shows the top screen alone, the panel the bottom one */
+            int ww, wh;
+            SDL_GetWindowSizeInPixels(win, &ww, &wh);
+            layout_compute_single(&g_layout_cfg, SCREEN_TOP, ww, wh, &g_layout);
+        }
+#endif
         plat_composite(&g_layout);
+#ifdef ALBW_DRM_LEASE
+        if (g_lease) plat_lease_draw();   /* after the top screen: the GPU draws the window first */
+#endif
         if (g_layout_editing || g_layout_edit.mode != LAYOUT_EDIT_NONE) plat_layout_overlay();
         last = win;
     } else {

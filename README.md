@@ -62,6 +62,21 @@ In desktop mode, `./build.sh /path/to/game.3ds` builds inside distrobox and make
 non-Steam game to play in Game Mode (needs release v0.2.10 or newer: older AppImages could not start under
 X11/XWayland). L3+R3 opens the game's menu.
 
+### ARM Linux (32-bit ARM build, AYN Thor)
+
+The game code keeps the 3DS's 32-bit memory layout, so on ARM it is built as a 32-bit ARM program
+(ARMv8 in AArch32). It runs on 64-bit ARM Linux systems whose CPU and kernel run 32-bit programs (the
+AYN Thor under Armada: cores 0-2 and 5-6, `allow_mismatched_32bit_el0`). Build it on a 32-bit ARM
+system or container (Arch Linux ARM armv7: `clang lld llvm python sdl3 mesa libglvnd`), then
+`python3 tools/build_decomp.py --snapshot decomp --arch armhf` and `ALBW_ARCH=armhf tools/link.sh`.
+`tools/make_armhf_bundle.sh` packs the program with its own loader and libraries
+(`build/albw-armhf.tar.gz`). Start it with `albw.sh --rom /path/to/game.3ds`.
+
+In Armada's Game Mode the top screen fills the display and the bottom screen goes on the Thor's
+bottom panel (leased from gamescope), with its touchscreen. `ALBW_DRM_LEASE=<connector>|auto` and
+`ALBW_TOUCH_DEVICE=/dev/input/eventN` set this by hand. `albw.sh` sets both from Armada's device
+profile.
+
 ### Windows (experimental)
 
 `windows/build_windows.sh`, run on Linux after a normal build, makes `build/ALBW-windows.zip`:
