@@ -3,7 +3,7 @@
 What each GitHub issue is, what the evidence says, and what was done. Newest work at the top of each entry.
 Updated as issues are worked through. (Status: **fixed in master** = in the repository, not yet in a release.)
 
-Last updated: 2026-11-25. Pull requests: #15 merged; #16 first commit (ARM build) merged, Thor panel commits held (GPL-derived code in an MIT part). Issue numbers are those of github.com/spacestate1/albw-native.
+Last updated: 2026-11-25. Pull requests: #15 merged; #16 first commit (ARM build) merged, Thor panel commits held (GPL-derived code in an MIT part); #17 (specialised fragment programs) merged. Issue numbers are those of github.com/spacestate1/albw-native.
 
 ## Summary
 
@@ -70,6 +70,20 @@ ready). The code: `edi = func_001E1228(param_1, &local, 0)` returned NULL, then 
 resource-slot allocator used while loading an `Archive/<name>` entry (it fills a record from a pool / heap); NULL means the
 pool or heap could not give one. Not reproduced. Possibly the same family (a thread-ordering problem on Windows, where the
 scheduler token was never returned) or a memory-range problem on that PC. Open; check again after the thread-exit fix.
+
+## Reports after v0.2.15
+
+- #7 (toxicground, RX 9070 XT): "now finally i can play the game". The thread-exit fix is confirmed on a real PC.
+- #13 (NEONZARIN, RX 550): v0.2.15 works with `--system-gl`; saving and loading work. Reports low frame rates and input lag
+  at 3x resolution, and unexplained crashes. PR #17 lowers GPU load (below); a log is needed for the crashes.
+- #13 (vi7ual, RTX 4060): the same start-up crash in `func_001E06D0` on v0.2.15. Likely cause found: the loader's `pread`
+  was lseek + read on the one ROM descriptor, so game threads loading at once could get each other's data (BOOT_LOG 168).
+  Now one operation; the failed load also names the archive, and a cut-off dump is reported. Not confirmed by the user.
+
+## PR #17: specialised fragment programs
+
+Merged. On this PC (AMD Vega 10, scripted new game, 2x) screenshots at five points are identical with and without it
+(`ALBW_NO_SPEC=1`), and GPU busy time fell from 68 % to 38 %.
 
 ## #12 / #13 (NEONZARIN) details
 
