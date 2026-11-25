@@ -78,7 +78,9 @@ scheduler token was never returned) or a memory-range problem on that PC. Open; 
   at 3x resolution, and unexplained crashes. PR #17 lowers GPU load (below); a log is needed for the crashes.
 - #13 (vi7ual, RTX 4060): the same start-up crash in `func_001E06D0` on v0.2.15. Likely cause found: the loader's `pread`
   was lseek + read on the one ROM descriptor, so game threads loading at once could get each other's data (BOOT_LOG 168).
-  Now one operation; the failed load also names the archive, and a cut-off dump is reported. Not confirmed by the user.
+  Now one operation; the failed load also names the archive, and a cut-off dump is reported. **Verified in the Windows VM**
+  (`ALBW_SELFTEST_PREAD=1`, four threads reading the ROM at once): old loader 7272 of 16000 reads wrong, new loader 0.
+  Not yet confirmed by the user.
 
 ## PR #17: specialised fragment programs
 
