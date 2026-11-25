@@ -3,7 +3,7 @@
 What each GitHub issue is, what the evidence says, and what was done. Newest work at the top of each entry.
 Updated as issues are worked through. (Status: **fixed in master** = in the repository, not yet in a release.)
 
-Last updated: 2026-11-25. Pull requests: #15 merged; #16 first commit (ARM build) merged, Thor panel commits held (GPL-derived code in an MIT part); #17 (specialised fragment programs) merged. Issue numbers are those of github.com/spacestate1/albw-native.
+Last updated: 2026-11-25. Pull requests: #15 merged; #16 first commit (ARM build) merged, Thor panel commits held (GPL-derived code in an MIT part); #17 (specialised fragment programs) merged; #16 closed by its author and resent without GPL code as #18 (AYN Thor bottom panel), merged (excluded from the Windows build). Issue numbers are those of github.com/spacestate1/albw-native.
 
 ## Summary
 
@@ -21,7 +21,7 @@ Last updated: 2026-11-25. Pull requests: #15 merged; #16 first commit (ARM build
 | 5 | Port does not use the dGPU on Linux | closed | closed |
 | 4 | Texture pack support | request | done in v0.2.13 (needs a pack with the new hash) |
 | 3 | 120+ FPS | request | not started |
-| 2 | ARM64 Linux build | request | 32-bit ARM (armhf) build merged from pull request #16 (not tested by us: no ARM machine); the AYN Thor panel part is not merged |
+| 2 | ARM64 Linux build | request | 32-bit ARM (armhf) build merged from pull request #16 and the AYN Thor panel from #18 (not tested on ARM by us) |
 | 1 | Stereoscopic 3D with texture packs | request | not started |
 
 ## Old save states after an update
