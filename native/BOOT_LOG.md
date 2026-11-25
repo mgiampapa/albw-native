@@ -338,5 +338,5 @@ One entry per boot-loop stop: where it stopped, cause, fix. USA addresses (EU in
 
 169. FIXED (user report): crash func_00163870+0x71, fault 0x00706e20, frame 3058. The decomp text mistook the literal pool after the function for a string, so the pool word holding the address of data_00706E20 stayed a raw 3DS address. compilefix uses data_00706E20. A sweep of the linked sources against the binary (words read out of string / Ram symbols that still hold a 3DS address) found no other case outside the start-up code.
 
-170. FIXED (user report): crash in the effect pass (002E39E8 -> 00689C8C -> compare, fault 0x1a, frame 4148). The heap sort's child compare lost its second argument in both sift-down loops; compilefix restores it. With more than one emitter set in the list this could crash or mis-order the draws. The same lost argument was in the list insertion sort 0049F434 (first compare), fixed too.
+170. FIXED (user report): crash in the effect pass (002E39E8 -> 00689C8C -> compare, fault 0x1a, frame 4148). The heap sort's child compare lost its second argument in both sift-down loops; compilefix restores it. With more than one emitter set in the list this could crash or mis-order the draws.
 
