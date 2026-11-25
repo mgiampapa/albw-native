@@ -21,6 +21,8 @@
  * Calling convention: callers are decompiled 32-bit ARM code, compiled cdecl. Every size argument
  * is the original 32-bit register value (uint32_t), every address argument a real pointer. */
 #define _GNU_SOURCE
+#include <execinfo.h>
+#include <stdio.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -322,14 +324,29 @@ void func_0058FA4C(void *self) {
  * so the same value is returned. memset (0x001164A8) preserves and returns dst. Sizes are the
  * 32-bit register values. */
 
+/* a NULL string reaching these two is a converted caller that lost a store (BOOT_LOG 167): the 3DS never passes one.
+ * Report it (the first few times, with the caller) and treat it as empty instead of crashing the game. */
+static const char *null_string(const char *what, void *caller) {
+    static int n;
+    if (n < 8) {
+        n++;
+        fprintf(stderr, "albw: warning: %s of a NULL string (called from %p); please report this log\n", what, caller);
+        backtrace_symbols_fd(&caller, 1, 2);
+    }
+    return "";
+}
+
 /* USA 0x00103CBC strlen(const char *s) -> u32 (word-at-a-time NUL scan). Confidence: high. */
 uint32_t func_00103CBC(const char *s) {
+    if (!s) s = null_string("strlen", __builtin_return_address(0));
     return (uint32_t)strlen(s);
 }
 
 /* USA 0x0010FBAC strcmp(a, b) -> int: byte difference (unsigned chars) at the first mismatch;
  * the word fast path gives the same sign. Confidence: high. */
 int32_t func_0010FBAC(const char *a, const char *b) {
+    if (!a) a = null_string("strcmp", __builtin_return_address(0));
+    if (!b) b = null_string("strcmp", __builtin_return_address(0));
     const unsigned char *x = (const unsigned char *)a, *y = (const unsigned char *)b;
     while (*x && *x == *y) x++, y++;
     return (int32_t)*x - (int32_t)*y;

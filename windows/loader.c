@@ -691,13 +691,32 @@ static int lx_open(const char *path, int flags, ...) {
 }
 static int lx_close(int fd) { return _close(fd); }
 static int lx_write(int fd, const void *b, size_t n) { return _write(fd, b, (unsigned)n); }
+/* pread / pwrite take the offset with the call: several game threads read the same ROM descriptor at once. Seeking
+   and then reading moved the shared file position under each other's feet, so one thread could get another's data
+   (a load that failed on some PCs only). An OVERLAPPED offset on a synchronous handle is one operation. */
 static int lx_pread(int fd, void *b, size_t n, long off) {
-    if (_lseeki64(fd, off, SEEK_SET) < 0) return -1;
-    return _read(fd, b, (unsigned)n);
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof ov);
+    ov.Offset = (DWORD)off;
+    DWORD got = 0;
+    if (!ReadFile(h, b, (DWORD)n, &got, &ov)) {
+        if (GetLastError() == ERROR_HANDLE_EOF) return 0;
+        errno = EIO;
+        return -1;
+    }
+    return (int)got;
 }
 static int lx_pwrite(int fd, const void *b, size_t n, long off) {
-    if (_lseeki64(fd, off, SEEK_SET) < 0) return -1;
-    return _write(fd, b, (unsigned)n);
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof ov);
+    ov.Offset = (DWORD)off;
+    DWORD put = 0;
+    if (!WriteFile(h, b, (DWORD)n, &put, &ov)) { errno = EIO; return -1; }
+    return (int)put;
 }
 static int lx_fcntl(int fd, int cmd, ...) { (void)fd; (void)cmd; return 0; }
 static int lx_fdatasync(int fd) { return _commit(fd); }

@@ -181,6 +181,36 @@ static void rom_forget(const char *path) {
 }
 #define ROM_FATAL(path, ...) do { rom_forget(path); runtime_fatal(__VA_ARGS__); } while (0)
 
+/* debug: ALBW_SELFTEST_PREAD=1: four threads read blocks of the ROM at once through one descriptor and compare them
+ * with what a single reader got (the Windows loader's pread moved the shared file position: wrong data). */
+#define ST_BLOCKS 32
+#define ST_SIZE 8192
+static struct { int fd; uint64_t base; uint8_t ref[ST_BLOCKS][ST_SIZE]; long bad[4]; } *g_st;
+static void *selftest_pread_main(void *arg) {
+    int t = (int)(uintptr_t)arg;
+    uint8_t b[ST_SIZE];
+    uint32_t x = 12345u + (uint32_t)t * 7919u;
+    for (int i = 0; i < 4000; i++) {
+        x = x * 1103515245u + 12345u;
+        int k = (int)((x >> 16) % ST_BLOCKS);
+        if (read_exact(g_st->fd, b, ST_SIZE, g_st->base + (uint64_t)k * 65536) != 0 || memcmp(b, g_st->ref[k], ST_SIZE)) g_st->bad[t]++;
+    }
+    return NULL;
+}
+static void selftest_pread(int fd, uint64_t base) {
+    g_st = calloc(1, sizeof *g_st);
+    if (!g_st) return;
+    g_st->fd = fd;
+    g_st->base = base;
+    for (int k = 0; k < ST_BLOCKS; k++) read_exact(fd, g_st->ref[k], ST_SIZE, base + (uint64_t)k * 65536);
+    pthread_t th[4];
+    for (int t = 0; t < 4; t++) pthread_create(&th[t], NULL, selftest_pread_main, (void *)(uintptr_t)t);
+    for (int t = 0; t < 4; t++) pthread_join(th[t], NULL);
+    fprintf(stderr, "selftest: concurrent file reads: %ld wrong of 16000\n", g_st->bad[0] + g_st->bad[1] + g_st->bad[2] + g_st->bad[3]);
+    free(g_st);
+    g_st = NULL;
+}
+
 /* Locate the RomFS level-3 image and the ExeFS inside the ROM.  Called with fs_lock held. */
 static void rom_open_locked(void) {
     if (rom.ready)
@@ -264,8 +294,13 @@ static void rom_open_locked(void) {
     if (read_exact(fd, l3h, 4, rom.romfs_l3_off) != 0 || rd32(l3h) != 0x28)
         ROM_FATAL(path, "fs: ROM '%s': RomFS level-3 header not found at 0x%llx", path,
                       (unsigned long long)rom.romfs_l3_off);
+    uint8_t last;   /* a cut-off dump passes the header checks and fails much later, in the middle of a load */
+    if (l3_size && read_exact(fd, &last, 1, rom.romfs_l3_off + l3_size - 1) != 0)
+        ROM_FATAL(path, "fs: ROM '%s' is cut off: its data should reach %llu MB (an incomplete dump or copy)", path,
+                  (unsigned long long)((rom.romfs_l3_off + l3_size) >> 20));
     rom.fd = fd;
     rom.ready = 1;
+    if (getenv("ALBW_SELFTEST_PREAD")) selftest_pread(fd, rom.romfs_l3_off);
     fs_log("ROM %s: RomFS level 3 at 0x%llx size 0x%llx, ExeFS at 0x%llx", path,
            (unsigned long long)rom.romfs_l3_off, (unsigned long long)rom.romfs_l3_size,
            (unsigned long long)rom.exefs_off);
