@@ -306,8 +306,10 @@ static const char FS_HEAD[] =
     "in vec4 v_color; in vec4 v_tc0; in vec2 v_tc1; in vec2 v_tc2; in vec3 v_normal; in vec3 v_view;\n"
     "out vec4 o_color;\n"
     "uniform sampler2D tex0, tex1, tex2; uniform samplerCube texcube0;\n"
-    "uniform ivec4 tev_src[6]; uniform ivec4 tev_cmb[6]; uniform vec4 tev_const[6];\n"
-    "uniform ivec2 tev_buf; uniform vec4 tev_bufcol; uniform ivec4 alpha_test; uniform ivec4 texcfg;\n"
+    "uniform vec4 tev_const[6]; uniform vec4 tev_bufcol; uniform ivec4 alpha_test;\n"
+    "#ifndef SPEC\n"   /* a specialised program (spec_program) has these as constants */
+    "uniform ivec4 tev_src[6]; uniform ivec4 tev_cmb[6]; uniform ivec2 tev_buf; uniform ivec4 texcfg;\n"
+    "#endif\n"
     "uniform ivec2 fog; uniform vec3 fog_color; uniform sampler2D fog_lut;\n";
 static const char FS_TEV[] =
     "vec4 t0 = vec4(0.0), t1 = vec4(0.0), t2 = vec4(0.0), prev = vec4(0.0), buf = vec4(0.0), k = vec4(0.0);\n"
@@ -431,19 +433,25 @@ static const char *VS_SRC[RPROG_COUNT] = { /* RPROG_H3D_DEFAULT: extension GLSL 
 
 /* ================================================================== GL setup */
 
-/* fragment program source (FL: with the fragment-lighting GLSL) */
-static char *fs_source(bool fl) {
-    size_t n = strlen(FS_HEAD) + strlen(FS_TEV) + strlen(RENDER_FS_FRAGLIGHT) + 64;
+/* fragment program source (FL: with the fragment-lighting GLSL; spec: constants of a specialised
+ * program, spec_program, or NULL) */
+static char *fs_source(bool fl, const char *spec) {
+    size_t n = strlen(FS_HEAD) + strlen(FS_TEV) + strlen(RENDER_FS_FRAGLIGHT) + (spec ? strlen(spec) : 0) + 64;
     char *s = xrealloc(NULL, n);
     { static int dbg = -1; if (dbg < 0) { const char *e = getenv("ALBW_FS_DEBUG"); dbg = e ? atoi(e) : 0; }
-      snprintf(s, n, "#version 330 core\n#define FL %d\n#define DBGOUT %d\n%s%s%s", fl ? 1 : 0, dbg, FS_HEAD, fl ? RENDER_FS_FRAGLIGHT : "", FS_TEV); }
+      snprintf(s, n, "#version 330 core\n#define FL %d\n#define DBGOUT %d\n%s%s%s%s", fl ? 1 : 0, dbg, spec ? spec : "", FS_HEAD,
+               fl ? RENDER_FS_FRAGLIGHT : "", FS_TEV); }
     return s;
 }
 
 #define FL_LUT_UNIT 4   /* texture unit of the fragment-lighting LUT texture */
 #define FOG_LUT_UNIT 6  /* texture unit of the fog LUT (128 x 1 RG32F) */
 
+typedef struct SpecProg SpecProg;
+static UniShadow *spec_shadow(const Program *p);
 static UniShadow *ush_of(const Program *p) {
+    UniShadow *sp = spec_shadow(p);
+    if (sp) return sp;
     if (!g_ush) {
         g_ush = calloc(RPROG_COUNT + RENDER_PROG_VARIANTS, sizeof *g_ush);
         if (!g_ush) abort();
@@ -453,9 +461,9 @@ static UniShadow *ush_of(const Program *p) {
     return &g_ush[i];
 }
 
-static void program_init(Program *p, const char *vs, bool fl) {
+static void program_init(Program *p, const char *vs, bool fl, const char *spec) {
     /* gl_program aborts with the log on a compile error: these sources are fixed */
-    char *fs = fs_source(fl);
+    char *fs = fs_source(fl, spec);
     p->prog = gl_program(vs, fs);
     free(fs);
     p->fl = fl;
@@ -491,9 +499,10 @@ static void program_init(Program *p, const char *vs, bool fl) {
     }
 }
 
-static void program_build(int id) { program_init(&R.progs[id], VS_SRC[id], false); }
+static void program_build(int id) { program_init(&R.progs[id], VS_SRC[id], false, NULL); }
 
 unsigned long render_variant_builds;   /* h3d program variants compiled so far (frame-time debug) */
+static char *g_variant_vs[RENDER_PROG_VARIANTS];   /* their vertex sources */
 static Program *build_variant(int v);
 /* the program for the current prog id / variant (extension variants compiled on first use) */
 static void use_program(GLuint prog) {
@@ -515,12 +524,103 @@ static Program *build_variant(int v) {
         size_t n = strlen(def) + strlen(R.ext.h3d_vs_body) + 32;
         char *src = xrealloc(NULL, n);
         snprintf(src, n, "#version 330 core\n%s\n%s", def, R.ext.h3d_vs_body);
-        program_init(p, src, true); /* the DefaultShader GLSL outputs v_tangent */
+        program_init(p, src, true, NULL); /* the DefaultShader GLSL outputs v_tangent */
         render_variant_builds++;
-        free(src);
+        g_variant_vs[v] = src;   /* kept: specialised programs link it again (spec_program) */
         if (g_trace) rlog("built h3d program variant %d", v);
     }
     return p;
+}
+
+/* ---------------------------------------------------------------- specialised fragment programs
+ * The common fragment program evaluates the six combiner stages from uniforms, with a branch per
+ * source / operand / combiner choice for every pixel. On tiling mobile GPUs (Adreno) that program
+ * was nearly all of the frame's GPU time: AYN Thor / Retroid Pocket 5 gameplay, 1x, 76% GPU busy,
+ * 4% with a fragment program that only samples texture 0. A specialised program has the stage
+ * set-up (sources, operands, combiners, scales, buffer updates) and the texture configuration as
+ * constants, so the compiler unrolls the stages and drops the branches (as Citra / Azahar generate
+ * a program per combiner set-up). Colours, the alpha test, fog and the vertex side stay uniforms.
+ * One per base program and set-up, compiled on first use; ALBW_NO_SPEC=1 keeps the common one. */
+struct SpecProg {
+    Program p;      /* first: a Program * of a specialised program points at its SpecProg */
+    UniShadow sh;
+    const Program *base;
+    GLint src[24], cmb[24], buf[2], tc[3];
+    SpecProg *next;
+};
+#define SPEC_BUCKETS 256
+static SpecProg *g_spec[SPEC_BUCKETS];
+unsigned long render_spec_builds;   /* compiled so far (frame-time debug) */
+
+static UniShadow *spec_shadow(const Program *p) {
+    if ((p >= R.progs && p < R.progs + RPROG_COUNT) || (p >= R.variants && p < R.variants + RENDER_PROG_VARIANTS)) return NULL;
+    return &((SpecProg *)p)->sh;
+}
+
+/* the stage set-up as the common program's uniforms carry it (upload_uniforms) */
+static void spec_state(GLint src[24], GLint cmb[24], GLint buf[2], GLint tc[3]) {
+    for (int i = 0; i < 6; i++) {
+        const RTevStage *t = &R.tev.stage[i];
+        src[i * 4 + 0] = t->src_rgb[0] | t->src_rgb[1] << 4 | t->src_rgb[2] << 8;
+        src[i * 4 + 1] = t->src_a[0] | t->src_a[1] << 4 | t->src_a[2] << 8;
+        src[i * 4 + 2] = t->op_rgb[0] | t->op_rgb[1] << 4 | t->op_rgb[2] << 8;
+        src[i * 4 + 3] = t->op_a[0] | t->op_a[1] << 4 | t->op_a[2] << 8;
+        cmb[i * 4 + 0] = t->combine_rgb;
+        cmb[i * 4 + 1] = t->combine_a;
+        cmb[i * 4 + 2] = t->scale_rgb;
+        cmb[i * 4 + 3] = t->scale_a;
+    }
+    buf[0] = R.tev.buf_update_rgb;
+    buf[1] = R.tev.buf_update_a;
+    tc[0] = R.tex_enable;
+    tc[1] = R.tex2_tc1;
+    tc[2] = (R.unit[0].type == 1 || R.unit[0].type == 4) ? 1 : R.unit[0].type == 3 ? 2 : 0;
+}
+
+static const char *base_vs(const Program *base) {
+    if (base >= R.variants && base < R.variants + RENDER_PROG_VARIANTS) return g_variant_vs[base - R.variants];
+    return VS_SRC[base - R.progs];
+}
+
+static Program *spec_program(Program *base) {
+    static int off = -1;
+    if (off < 0) off = getenv("ALBW_NO_SPEC") != NULL;
+    const char *vs = base_vs(base);
+    if (off || !vs) return base;
+    GLint src[24], cmb[24], buf[2], tc[3];
+    spec_state(src, cmb, buf, tc);
+    uint64_t h = 1469598103934665603ull ^ (uintptr_t)base;
+    const GLint *parts[4] = {src, cmb, buf, tc};
+    const int lens[4] = {24, 24, 2, 3};
+    for (int k = 0; k < 4; k++)
+        for (int i = 0; i < lens[k]; i++) h = (h ^ (uint32_t)parts[k][i]) * 1099511628211ull;
+    SpecProg **head = &g_spec[h % SPEC_BUCKETS];
+    for (SpecProg *e = *head; e; e = e->next)
+        if (e->base == base && !memcmp(e->src, src, sizeof src) && !memcmp(e->cmb, cmb, sizeof cmb) &&
+            !memcmp(e->buf, buf, sizeof buf) && !memcmp(e->tc, tc, sizeof tc))
+            return &e->p;
+    char spec[1024];
+    int n = snprintf(spec, sizeof spec, "#define SPEC 1\nconst ivec4 tev_src[6] = ivec4[6](");
+    for (int i = 0; i < 6; i++)
+        n += snprintf(spec + n, sizeof spec - n, "%sivec4(%d,%d,%d,%d)", i ? "," : "", src[i * 4], src[i * 4 + 1], src[i * 4 + 2], src[i * 4 + 3]);
+    n += snprintf(spec + n, sizeof spec - n, ");\nconst ivec4 tev_cmb[6] = ivec4[6](");
+    for (int i = 0; i < 6; i++)
+        n += snprintf(spec + n, sizeof spec - n, "%sivec4(%d,%d,%d,%d)", i ? "," : "", cmb[i * 4], cmb[i * 4 + 1], cmb[i * 4 + 2], cmb[i * 4 + 3]);
+    snprintf(spec + n, sizeof spec - n, ");\nconst ivec2 tev_buf = ivec2(%d,%d);\nconst ivec4 texcfg = ivec4(%d,%d,%d,0);\n", buf[0], buf[1],
+             tc[0], tc[1], tc[2]);
+    SpecProg *e = calloc(1, sizeof *e);
+    if (!e) abort();
+    e->base = base;
+    memcpy(e->src, src, sizeof src);
+    memcpy(e->cmb, cmb, sizeof cmb);
+    memcpy(e->buf, buf, sizeof buf);
+    memcpy(e->tc, tc, sizeof tc);
+    program_init(&e->p, vs, base->fl, spec);
+    e->next = *head;
+    *head = e;
+    render_spec_builds++;
+    if (g_trace) rlog("specialised fragment program %lu for base %p", render_spec_builds, (const void *)base);
+    return &e->p;
 }
 
 static const char *SCAN_VS =
@@ -1599,7 +1699,7 @@ int render_draw_bind(void) {
             R.frag_dirty = true;
         }
     }
-    Program *p = cur_program();
+    Program *p = spec_program(cur_program());
     use_program(p->prog);
     upload_uniforms(p);
     for (int i = 0; i < 3; i++) bind_unit(i);
@@ -1793,7 +1893,7 @@ static bool draw_setup(uint32_t vmin, uint32_t vmax) {
     /* the platform layer / scan-out rebind other framebuffers and state between frames */
     glBindFramebuffer(GL_FRAMEBUFFER, R.cur_fbo);
     if (R.frag_dirty) apply_frag();
-    Program *p = cur_program();
+    Program *p = spec_program(cur_program());
     use_program(p->prog);
     upload_uniforms(p);   /* per program: only what changed since its last draw */
     for (int i = 0; i < 3; i++) bind_unit(i);
