@@ -46,7 +46,10 @@
 
 const char RENDER_FS_FRAGLIGHT[] =
     "in vec3 v_tangent;\n"
-    "uniform ivec4 fl_cfg; uniform ivec4 fl_in[2]; uniform vec4 fl_scale[2]; uniform vec4 fl_amb;\n"
+    "#ifndef SPEC_FL\n"   /* a specialised program (render.c spec_program) has these as constants */
+    "uniform ivec4 fl_cfg; uniform ivec4 fl_in[2];\n"
+    "#endif\n"
+    "uniform vec4 fl_scale[2]; uniform vec4 fl_amb;\n"
     "uniform vec4 fl_l[56]; uniform sampler2D fl_lut;\n"
     "int fl_sel(int i){ return i < 4 ? fl_in[0][i] : fl_in[1][i - 4]; }\n"
     "float fl_sc(int i){ return i < 4 ? fl_scale[0][i] : fl_scale[1][i - 4]; }\n"
@@ -434,14 +437,8 @@ static void upload_rows(void) {
     S.rows_dirty = false;
 }
 
-void fraglight_upload(FLLoc *loc, int unit) {
-    if (loc->cfg < 0) return;
-    glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
-    if (S.rows_dirty || !S.tex || S.lut_gen_up != g_lut_gen) upload_rows();
-    else glBindTexture(GL_TEXTURE_2D, S.tex);
-    glActiveTexture(GL_TEXTURE0);
-    if (loc->gen == S.gen && loc->gen) return;
-    loc->gen = S.gen;
+/* the light count, the LUTs in use and the mode bits (fl_cfg), and each LUT's input (fl_in) */
+int fraglight_config(int cfg[4], int in[8]) {
     const FLEnv *e = &S.env;
     int n = e->enable ? (e->nlights ? e->nlights : 1) : 0;
     if (n > 8) n = 8;
@@ -450,14 +447,29 @@ void fraglight_upload(FLLoc *loc, int unit) {
     static const int off_bit[6] = {FLI_D0, FLI_D1, FLI_FR, FLI_RR, FLI_RG, FLI_RB};
     for (int i = 0; i < 6; i++)
         if (e->lut_off >> i & 1) luts &= ~(1 << off_bit[i]);
-    GLint cfg[4] = {n, luts,
-                    (e->fresnel_sel & 3) | (e->clamp_highlights ? 4 : 0) | (e->bump_mode & 3) << 4 |
-                        (e->bump_sel & 3) << 6 | (e->bump_renorm ? 1 << 8 : 0),
-                    S.in.abs};
+    cfg[0] = n;
+    cfg[1] = luts;
+    cfg[2] = (e->fresnel_sel & 3) | (e->clamp_highlights ? 4 : 0) | (e->bump_mode & 3) << 4 | (e->bump_sel & 3) << 6 |
+             (e->bump_renorm ? 1 << 8 : 0);
+    cfg[3] = S.in.abs;
+    for (int i = 0; i < 8; i++) in[i] = i < FLI_COUNT ? S.in.sel[i] & 7 : 0;
+    return n;
+}
+
+void fraglight_upload(FLLoc *loc, int unit) {
+    if (loc->light < 0) return;   /* (fl_cfg is a constant in a specialised program) */
+    glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
+    if (S.rows_dirty || !S.tex || S.lut_gen_up != g_lut_gen) upload_rows();
+    else glBindTexture(GL_TEXTURE_2D, S.tex);
+    glActiveTexture(GL_TEXTURE0);
+    if (loc->gen == S.gen && loc->gen) return;
+    loc->gen = S.gen;
+    const FLEnv *e = &S.env;
+    GLint cfg[4], in[8];
+    int n = fraglight_config(cfg, in);
     pUniform4iv(loc->cfg, 1, cfg);
-    GLint in[8] = {0};
     float sc[8] = {0};
-    for (int i = 0; i < FLI_COUNT; i++) { in[i] = S.in.sel[i] & 7; sc[i] = scale_of(S.in.scale[i]); }
+    for (int i = 0; i < FLI_COUNT; i++) sc[i] = scale_of(S.in.scale[i]);
     pUniform4iv(loc->in0, 2, in);
     glUniform4fv(loc->scale, 2, sc);
     float amb[4] = {e->ambient[0] / 255.f, e->ambient[1] / 255.f, e->ambient[2] / 255.f, 0};
@@ -478,7 +490,7 @@ void fraglight_upload(FLLoc *loc, int unit) {
         }
         v[19] = s->directional ? 1.0f : 0.0f;
         int f = (s->two_sided ? 1 : 0) | (s->geo0 ? 2 : 0) | (s->geo1 ? 4 : 0) |
-                ((e->spot_mask >> id & 1) && (luts >> FLI_SP & 1) ? 8 : 0) | (e->da_mask >> id & 1 ? 16 : 0);
+                ((e->spot_mask >> id & 1) && (cfg[1] >> FLI_SP & 1) ? 8 : 0) | (e->da_mask >> id & 1 ? 16 : 0);
         v[23] = (float)f;
         v[24] = s->da_scale;
         v[25] = s->da_bias;

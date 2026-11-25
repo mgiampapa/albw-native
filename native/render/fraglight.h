@@ -105,6 +105,9 @@ void fraglight_locations(unsigned prog, FLLoc *loc);
 /* uploads the state if it changed since this program last got it; binds the LUT texture on
  * texture unit `unit` */
 void fraglight_upload(FLLoc *loc, int unit);
+/* the current light count, LUTs in use and mode bits (cfg) and LUT inputs (in), as fraglight_upload
+ * sends them; returns the light count */
+int fraglight_config(int cfg[4], int in[8]);
 
 /* debugging */
 const FLEnv *fraglight_env(void);

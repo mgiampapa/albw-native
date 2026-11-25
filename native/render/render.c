@@ -539,13 +539,16 @@ static Program *build_variant(int v) {
  * 4% with a fragment program that only samples texture 0. A specialised program has the stage
  * set-up (sources, operands, combiners, scales, buffer updates) and the texture configuration as
  * constants, so the compiler unrolls the stages and drops the branches (as Citra / Azahar generate
- * a program per combiner set-up). Colours, the alpha test, fog and the vertex side stay uniforms.
+ * a program per combiner set-up). In programs with fragment lighting, the light count, the LUTs in
+ * use, the mode bits and the LUT inputs are constants too (about a third of the GPU time left at 4x
+ * on the Thor). Colours, lights, the alpha test, fog and the vertex side stay uniforms.
  * One per base program and set-up, compiled on first use; ALBW_NO_SPEC=1 keeps the common one. */
 struct SpecProg {
     Program p;      /* first: a Program * of a specialised program points at its SpecProg */
     UniShadow sh;
     const Program *base;
     GLint src[24], cmb[24], buf[2], tc[3];
+    GLint fl[12];   /* fragment lighting (programs with it): fraglight_config's cfg[4], in[8] */
     SpecProg *next;
 };
 #define SPEC_BUCKETS 256
@@ -587,17 +590,18 @@ static Program *spec_program(Program *base) {
     if (off < 0) off = getenv("ALBW_NO_SPEC") != NULL;
     const char *vs = base_vs(base);
     if (off || !vs) return base;
-    GLint src[24], cmb[24], buf[2], tc[3];
+    GLint src[24], cmb[24], buf[2], tc[3], fl[12] = {0};
     spec_state(src, cmb, buf, tc);
+    if (base->fl) fraglight_config(fl, fl + 4);
     uint64_t h = 1469598103934665603ull ^ (uintptr_t)base;
-    const GLint *parts[4] = {src, cmb, buf, tc};
-    const int lens[4] = {24, 24, 2, 3};
-    for (int k = 0; k < 4; k++)
+    const GLint *parts[5] = {src, cmb, buf, tc, fl};
+    const int lens[5] = {24, 24, 2, 3, 12};
+    for (int k = 0; k < 5; k++)
         for (int i = 0; i < lens[k]; i++) h = (h ^ (uint32_t)parts[k][i]) * 1099511628211ull;
     SpecProg **head = &g_spec[h % SPEC_BUCKETS];
     for (SpecProg *e = *head; e; e = e->next)
         if (e->base == base && !memcmp(e->src, src, sizeof src) && !memcmp(e->cmb, cmb, sizeof cmb) &&
-            !memcmp(e->buf, buf, sizeof buf) && !memcmp(e->tc, tc, sizeof tc))
+            !memcmp(e->buf, buf, sizeof buf) && !memcmp(e->tc, tc, sizeof tc) && !memcmp(e->fl, fl, sizeof fl))
             return &e->p;
     char spec[1024];
     int n = snprintf(spec, sizeof spec, "#define SPEC 1\nconst ivec4 tev_src[6] = ivec4[6](");
@@ -606,8 +610,12 @@ static Program *spec_program(Program *base) {
     n += snprintf(spec + n, sizeof spec - n, ");\nconst ivec4 tev_cmb[6] = ivec4[6](");
     for (int i = 0; i < 6; i++)
         n += snprintf(spec + n, sizeof spec - n, "%sivec4(%d,%d,%d,%d)", i ? "," : "", cmb[i * 4], cmb[i * 4 + 1], cmb[i * 4 + 2], cmb[i * 4 + 3]);
-    snprintf(spec + n, sizeof spec - n, ");\nconst ivec2 tev_buf = ivec2(%d,%d);\nconst ivec4 texcfg = ivec4(%d,%d,%d,0);\n", buf[0], buf[1],
-             tc[0], tc[1], tc[2]);
+    n += snprintf(spec + n, sizeof spec - n, ");\nconst ivec2 tev_buf = ivec2(%d,%d);\nconst ivec4 texcfg = ivec4(%d,%d,%d,0);\n", buf[0], buf[1],
+                  tc[0], tc[1], tc[2]);
+    if (base->fl)
+        snprintf(spec + n, sizeof spec - n,
+                 "#define SPEC_FL 1\nconst ivec4 fl_cfg = ivec4(%d,%d,%d,%d);\nconst ivec4 fl_in[2] = ivec4[2](ivec4(%d,%d,%d,%d),ivec4(%d,%d,%d,%d));\n",
+                 fl[0], fl[1], fl[2], fl[3], fl[4], fl[5], fl[6], fl[7], fl[8], fl[9], fl[10], fl[11]);
     SpecProg *e = calloc(1, sizeof *e);
     if (!e) abort();
     e->base = base;
@@ -615,6 +623,7 @@ static Program *spec_program(Program *base) {
     memcpy(e->cmb, cmb, sizeof cmb);
     memcpy(e->buf, buf, sizeof buf);
     memcpy(e->tc, tc, sizeof tc);
+    memcpy(e->fl, fl, sizeof fl);
     program_init(&e->p, vs, base->fl, spec);
     e->next = *head;
     *head = e;
