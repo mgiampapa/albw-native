@@ -13,16 +13,16 @@
 #include <stdint.h>
 
 void func_00108DF8(void);
-void func_00108B98(void);
-uint32_t func_0010B240(void);
+uint32_t func_00108B98(void);
+uint32_t func_0010B240(uint32_t h);
 void func_0010873C(uint32_t r, uint32_t pc, uint32_t sign);
 void func_00108F4C(void);
 
 void func_00108FF0(void)
 {
     func_00108DF8();
-    func_00108B98();
-    uint32_t r = func_0010B240();
+    uint32_t h = func_00108B98();
+    uint32_t r = func_0010B240(h);   /* r0 passes straight on (EU 00108FF8..00108FFC; BOOT_LOG 171) */
     if (r >> 31)
         func_0010873C(r, 0x00109008u, r >> 31);
     func_00108F4C();

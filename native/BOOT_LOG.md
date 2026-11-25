@@ -340,3 +340,5 @@ One entry per boot-loop stop: where it stopped, cause, fix. USA addresses (EU in
 
 170. FIXED (user report): crash in the effect pass (002E39E8 -> 00689C8C -> compare, fault 0x1a, frame 4148). The heap sort's child compare lost its second argument in both sift-down loops; compilefix restores it. With more than one emitter set in the list this could crash or mis-order the draws.
 
+171. Sweep for calls that pass fewer arguments than the called function reads (comments stripped: 83 sites, 16 functions), each compared with the ARM. Real: 00551970 -> 0054E650 lost the object pointer, shifting the three floats (pushable objects' height test); 0046CE10 -> 0034C57C lost r1 = 0; 00108FF0 -> 0010B240 lost r0 (= the result of 00108B98). Harmless (the ARM leaves those registers unset too, or the native replacement ignores them): 00226BBC, 002FE9CC, 00326DAC, 00144F4C, 0016FD34, 0032740C, 002E0274, 001E0B94, 004ED9F4, 004154B4, and the hand-written callers in sead_random.c / os.c. The sweep sees only direct calls in the linked sources; function-pointer calls (BOOT_LOG 170) and calls with all arguments present but wrong are not covered.
+

@@ -13,7 +13,7 @@ extern int func_002FE86C(int p);
 extern int func_002FE9A8(int p);
 extern int func_002FE9CC(int p);
 extern int func_003D2F18(int a, uint32_t b, uint32_t *c);
-extern int func_0034C57C(int p);
+extern int func_0034C57C(int p, int n);
 extern int func_005568D4(int p);
 extern int func_001119F4(uint32_t *p, uint32_t a);
 extern int func_00115DC8(uint32_t *p);
@@ -46,7 +46,7 @@ uint32_t func_003D2C58(uint32_t param_1, uint32_t *param_2)
 void func_0046CE10(int param_1)
 {
     W(param_1, 0xc4) = 0;
-    func_0034C57C(W(param_1, 0xb4));
+    func_0034C57C(W(param_1, 0xb4), 0);   /* r1 = 0 from EU 0046CDEC (BOOT_LOG 171) */
     int v = func_005568D4(*(int32_t *)data_0070FB60);
     W(param_1, 200) = v;
     *(uint8_t *)(uintptr_t)(W(param_1, 0xb4) + 0x58) = 1;
